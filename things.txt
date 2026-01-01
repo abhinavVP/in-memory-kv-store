@@ -1,0 +1,19 @@
+1 command execution worker
+1 commands queue/channel
+1 listener server
+client handling workers
+
+
+binary protocol for commands-
+header
+    type - 2 bits - SET/GET/DELETE
+    length of key - 2 bytes - 2 bits
+    length of value - 4 bytes (will be zero and ignored if type=get or delete)
+key
+value - empty and to be ignored for set/delete
+
+binary protocol for responses-
+header
+    type - 1 byte but its actually just 2 bits with zero padding because idk what to do with remaining 6 bits - SET/GET/DELETE - used for validation
+    length of value - 4 bytes (only for GET. all bits set to 1 if value doesnt exist)
+value - empty and to be ignored for set/delete and for get if value doesnt exist or is empty
