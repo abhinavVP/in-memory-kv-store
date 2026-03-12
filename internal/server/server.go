@@ -1,25 +1,37 @@
 package server
 
 import (
+	"container/heap"
 	"fmt"
 	"io"
 	"kvs/internal/command"
 	"kvs/internal/execution"
 	"kvs/internal/messaging"
+	"kvs/internal/ttlheap"
 	"log"
 	"net"
+	"sync"
+	"time"
 )
 
 type Server struct{
 	PORT				int
 	CommandsChannel 	chan command.Command
 	Store				map[string][]byte
+	TTLMap				map[string]uint64
+	TTLheap				*ttlheap.ExpiryHeap
+	mu					sync.Mutex
 }
 
 func (s *Server)InitServer(port int, chanSize int){
+	h := &ttlheap.ExpiryHeap{}
+	heap.Init(h)
+
 	s.PORT = port
 	s.CommandsChannel = make(chan command.Command, chanSize)
 	s.Store = make(map[string][]byte)
+	s.TTLMap = make(map[string]uint64)
+	s.TTLheap = h
 }
 
 func (s *Server) Listen(){
@@ -31,7 +43,7 @@ func (s *Server) Listen(){
 	defer listener.Close()
 	log.Printf("[server] now listening on PORT %v", s.PORT)
 
-	go execution.Executor(s.CommandsChannel, s.Store)
+	go execution.Executor(s.CommandsChannel, s.Store, s.TTLMap, *s.TTLheap)
 
 	for {
 		conn , err := listener.Accept()
@@ -67,5 +79,41 @@ func (s *Server)handleClient(conn net.Conn){
 		}
 	}
 }
+
+func (s *Server) TTLMonitor() {
+	for {
+		s.mu.Lock()
+
+		if s.TTLheap.Len() == 0 {
+			s.mu.Unlock()
+			time.Sleep(time.Second)
+			continue
+		}
+
+		item := (*s.TTLheap)[0]
+		now := uint64(time.Now().Unix())
+
+		if item.ExpiresAt > now {
+			sleepFor := time.Duration(item.ExpiresAt-now) * time.Second
+			s.mu.Unlock()
+			time.Sleep(sleepFor)
+			continue
+		}
+
+		expiredItem := heap.Pop(s.TTLheap).(*ttlheap.ExpiryItem)
+
+		currentExpiry, ok := s.TTLMap[expiredItem.Key]
+		if !ok || currentExpiry != expiredItem.ExpiresAt {
+			s.mu.Unlock()
+			continue
+		}
+
+		delete(s.TTLMap, expiredItem.Key)
+		delete(s.Store, expiredItem.Key)
+
+		s.mu.Unlock()
+	}
+}
+
 
 

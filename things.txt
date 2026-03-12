@@ -4,7 +4,8 @@
 client handling workers
 
 
-binary protocol for commands-
+binary protocol:
+request-
 header
     type - 2 bits - SET/GET/DELETE
     length of key - 2 bytes - 2 bits
@@ -12,8 +13,27 @@ header
 key
 value - empty and to be ignored for set/delete
 
-binary protocol for responses-
+responses-
 header
     type - 1 byte but its actually just 2 bits with zero padding because idk what to do with remaining 6 bits - SET/GET/DELETE - used for validation
     length of value - 4 bytes (only for GET. all bits set to 1 if value doesnt exist)
 value - empty and to be ignored for set/delete and for get if value doesnt exist or is empty
+
+
+protocol 2.0:
+request-
+header
+    type - 1 byte
+    flags - 1 byte - stuff like ttl, etc
+    length of key - 2 bytes
+    length of value - 4 bytes - if applicable else zero
+    ttl - 8 bytes - integer representing seconds
+key
+value
+
+
+response-
+header
+    success - 1 byte - true/false
+    length of value - 4 bytes - if applicable else zero
+value 

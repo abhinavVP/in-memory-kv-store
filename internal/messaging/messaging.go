@@ -8,83 +8,91 @@ import (
 )
 
 func Read(r io.Reader) (command.Command, error){
-	header := make([]byte, 6)
+	header := make([]byte, 16)
 
 	n, err := io.ReadFull(r, header)
-
-	if err != nil{
+	if err != nil {
 		return nil, err
 	}
-	if n == 0{
-		return nil, fmt.Errorf("read 0 bytes from client, unable to read")
+	if n != 16 {
+		return nil, fmt.Errorf("incomplete header read")
 	}
 
-	t := header[0] >> 6 // first 2 bit give the command type, 1 = SET, 2 = GET, 3 = DELETE
-	len_key := binary.BigEndian.Uint16(header[:2]) & 0x3FFF
-	key := make([]byte, len_key)
+	cmdType := header[0]
+	flags := header[1]
+	keyLen := binary.BigEndian.Uint16(header[2:4])
+	valueLen := binary.BigEndian.Uint32(header[4:8])
+	ttl := binary.BigEndian.Uint64(header[8:16])
+
+	key := make([]byte, keyLen)
 	_, err = io.ReadFull(r, key)
-	if err != nil{
-		return nil, nil
+	if err != nil {
+		return nil, err
 	}
-	switch t{
-	case 0:
-		return nil, fmt.Errorf("recieved invalid type from client")
+	switch cmdType {
+
 	case 1:
-		len_value := binary.BigEndian.Uint32(header[2:])
-		value := make([]byte, len_value)
+		if valueLen == 0 {
+			return nil, fmt.Errorf("SET command missing value")
+		}
+
+		value := make([]byte, valueLen)
 		_, err = io.ReadFull(r, value)
-		if err != nil{
+		if err != nil {
 			return nil, err
 		}
+
+		var ttlVal uint64
+		if flags & 0x01 != 0 {
+			ttlVal = ttl
+		}
+
 		return &command.Set{
-			Key: string(key),
-			Value: value,
+			Key:    string(key),
+			Value:  value,
 			Result: make(chan command.Result),
+			TTL:    ttlVal,
 		}, nil
-			
+
 	case 2:
 		return &command.Get{
-			Key: string(key),
+			Key:    string(key),
 			Result: make(chan command.Result),
 		}, nil
+
 	case 3:
 		return &command.Delete{
-			Key: string(key),
+			Key:    string(key),
 			Result: make(chan command.Result),
 		}, nil
+
 	default:
-		return nil, fmt.Errorf("recieved invalid type from client")			
+		return nil, fmt.Errorf("received invalid command type: %d", cmdType)
 	}
 }	
 
-func SerializeResponse(r command.Result) []byte{
+func SerializeResponse(r command.Result) []byte {
 	header := make([]byte, 5)
-	t := byte(r.Type)
-	header[0] = t
-	
-	switch t{
-	case 1,3:
-		return header
-	case 2:
-		if r.Success { //if key exists
-			len_value := uint32(len(r.Message))
-			binary.BigEndian.PutUint32(header[1:], len_value)
-			packet := make([]byte,5 + len_value)
-			copy(packet[0:5], header)
 
-			if len_value > 0{ // sometimes can be empty value
-				value := r.Message
-				copy(packet[5:], value)
-			}
-			return packet	
-		}else{
-			len_value := uint32(0xFFFFFFFF)
-			binary.BigEndian.PutUint32(header[1:], len_value)
-			
-			return header
-		}
-		
-	default:
-		return nil
+	header[0] = byte(r.Status)
+
+	var valueLen uint32
+	if r.Status == command.StatusOK && len(r.Message) > 0 {
+		valueLen = uint32(len(r.Message))
+	} else {
+		valueLen = 0
 	}
+
+	binary.BigEndian.PutUint32(header[1:], valueLen)
+
+	if valueLen == 0 {
+		return header
+	}
+
+	packet := make([]byte, 5+valueLen)
+	copy(packet[:5], header)
+	copy(packet[5:], r.Message)
+
+	return packet
 }
+
