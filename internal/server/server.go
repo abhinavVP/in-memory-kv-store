@@ -43,7 +43,7 @@ func (s *Server) Listen(){
 	defer listener.Close()
 	log.Printf("[server] now listening on PORT %v", s.PORT)
 
-	go execution.Executor(s.CommandsChannel, s.Store, s.TTLMap, *s.TTLheap)
+	go execution.Executor(s.CommandsChannel, s.Store, s.TTLMap, s.TTLheap, &s.mu)
 
 	for {
 		conn , err := listener.Accept()

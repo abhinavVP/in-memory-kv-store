@@ -1,7 +1,9 @@
 package command
 
 import (
+	"container/heap"
 	"kvs/internal/ttlheap"
+	"sync"
 	"time"
 )
 
@@ -24,7 +26,7 @@ const (
 )
 
 type Command interface{
-	Execute(map[string][]byte, map[string]uint64, ttlheap.ExpiryHeap)
+	Execute(map[string][]byte, map[string]uint64, *ttlheap.ExpiryHeap, *sync.Mutex)
 	Response()	Result
 }
 
@@ -51,40 +53,80 @@ type Delete struct{
 	Result	chan Result
 }
 
-func (s *Set) Execute(items map[string][]byte, TTLmap map[string]uint64, TTLheap ttlheap.ExpiryHeap) {
-	items[s.Key] = s.Value
-	if s.TTL > 0{
-		expiry := time.Now().Add(time.Duration(s.TTL) * time.Second).Unix()
-		TTLmap[s.Key] = uint64(expiry)
-	}
-	s.Result <- Result{
-		Status: 0,
-		Message: nil,
-	}
+func (s *Set) Execute(items map[string][]byte, TTLmap map[string]uint64, TTLheap *ttlheap.ExpiryHeap, mu *sync.Mutex) {
+    mu.Lock()
+    defer mu.Unlock() // Ensures the lock is released when the function exits
+
+    items[s.Key] = s.Value
+    if s.TTL > 0 {
+        expiry := time.Now().Add(time.Duration(s.TTL) * time.Second).Unix()
+        TTLmap[s.Key] = uint64(expiry)
+
+        item := &ttlheap.ExpiryItem{
+            Key:       s.Key,
+            ExpiresAt: uint64(expiry),
+        }
+        
+        heap.Push(TTLheap, item)
+    } else {
+        // If overwriting a key without a new TTL, remove any old TTL record
+        delete(TTLmap, s.Key)
+    }
+
+    s.Result <- Result{
+        Status: StatusOK,
+        Message: nil,
+    }
 }
 
-func (g *Get) Execute(items map[string][]byte, TTLmap map[string]uint64, TTLheap ttlheap.ExpiryHeap){
-	value, ok := items[g.Key]
-	if ok {
-		g.Result <- Result{
-			Status: 0,
-			Message: value,
-		}
-	}else{
-		g.Result <- Result{
-			Status: 1,
-			Message: nil,
-		}
-	}
+func (g *Get) Execute(items map[string][]byte, TTLmap map[string]uint64, TTLheap *ttlheap.ExpiryHeap, mu *sync.Mutex) {
+    mu.Lock()
+    defer mu.Unlock()
+
+    value, ok := items[g.Key]
+    if ok {
+        if expiry, hasTTL := TTLmap[g.Key]; hasTTL {
+            now := uint64(time.Now().Unix())
+            
+            if now >= expiry {
+                // Passive expiration: delete from both maps
+                delete(items, g.Key)
+                delete(TTLmap, g.Key)
+                
+                g.Result <- Result{
+                    Status:  StatusKeyNotFound,
+                    Message: nil,
+                }
+                return
+            }
+        }
+        status := StatusOK
+        if len(value) == 0 {
+            status = StatusKeyExistsButNoValue
+        }
+        g.Result <- Result{
+            Status: status,
+            Message: value,
+        }
+    } else {
+        g.Result <- Result{
+            Status: StatusKeyNotFound,
+            Message: nil,
+        }
+    }
 }
 
-func (d *Delete) Execute(items map[string][]byte, TTLmap map[string]uint64, TTLheap ttlheap.ExpiryHeap) {
-	delete(items, d.Key)
+func (d *Delete) Execute(items map[string][]byte, TTLmap map[string]uint64, TTLheap *ttlheap.ExpiryHeap, mu *sync.Mutex) {
+    mu.Lock()
+    defer mu.Unlock()
 
-	d.Result <- Result{
-		Status: 0,
-		Message: nil,
-	}
+    delete(items, d.Key)
+    delete(TTLmap, d.Key) // Ensure we also clean up the TTL map
+
+    d.Result <- Result{
+        Status: StatusOK,
+        Message: nil,
+    }
 }
 
 func (s *Set) Response() Result{
