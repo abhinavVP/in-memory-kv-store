@@ -1,119 +1,109 @@
 package server
 
 import (
-	"container/heap"
-	"fmt"
-	"io"
+	"bufio"
+	"hash/fnv"
 	"kvs/internal/command"
 	"kvs/internal/execution"
 	"kvs/internal/messaging"
-	"kvs/internal/ttlheap"
 	"log"
 	"net"
 	"sync"
-	"time"
 )
 
 type Server struct{
-	PORT				int
-	CommandsChannel 	chan command.Command
-	Store				map[string][]byte
-	TTLMap				map[string]uint64
-	TTLheap				*ttlheap.ExpiryHeap
-	mu					sync.Mutex
+	PORT	string
+	IP		string
+	shards	[]*execution.Executor
+	N		int
 }
 
-func (s *Server)InitServer(port int, chanSize int){
-	h := &ttlheap.ExpiryHeap{}
-	heap.Init(h)
+type Client struct{
+	Conn 	net.Conn
+	Resch 	chan command.Result
+}
 
+func (s *Server)Init(port, ip string, n int){
 	s.PORT = port
-	s.CommandsChannel = make(chan command.Command, chanSize)
-	s.Store = make(map[string][]byte)
-	s.TTLMap = make(map[string]uint64)
-	s.TTLheap = h
+	s.IP = ip
+	s.N = n
 }
 
-func (s *Server) Listen(){
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", s.PORT))
+func (s *Server)Listen(){
+	lis, err := net.Listen("tcp", net.JoinHostPort(s.IP, s.PORT))
 	if err != nil{
 		log.Printf("[server] error trying to listen: %v", err)
 		return
 	}
-	defer listener.Close()
-	log.Printf("[server] now listening on PORT %v", s.PORT)
 
-	go execution.Executor(s.CommandsChannel, s.Store, s.TTLMap, s.TTLheap, &s.mu)
+	defer lis.Close()
+
+	s.shards = make([]*execution.Executor, s.N)
+	for i := range s.shards{
+		s.shards[i] = &execution.Executor{
+			Reqch: make(chan execution.Request, 1024),
+			Store: make(map[string][]byte),
+			Mu: sync.Mutex{},
+		}
+
+		go s.shards[i].Run()
+	}
 
 	for {
-		conn , err := listener.Accept()
+		conn , err := lis.Accept()
 		if err != nil{
 			log.Printf("[server] error trying to accept connection from a client: %v", err)
 			continue
 		}
 
-		go s.handleClient(conn)
+		c := Client{
+			Conn: conn,
+			Resch: make(chan command.Result, 7),
+		}
+
+		go s.clientReader(c)
+		go s.clientWriter(c)
 	}
 }
 
-func (s *Server)handleClient(conn net.Conn){
-	for{
-		cmd, err := messaging.Read(conn)
+func (s *Server)clientReader(c Client){
+	buf := bufio.NewReader(c.Conn)
+	header := make([]byte, 16)
+	for{	
+		r, err := messaging.Read(buf, header)
 		if err != nil{
-			if err == io.EOF {
-				log.Println("[client handler] client closed connection")
-			} else {
-				log.Printf("[client handler] error trying to read from the client: %v", err)
-			}
+			log.Print(err.Error())
+			c.Conn.Close()
+			close(c.Resch)
 			return
 		}
-
-		s.CommandsChannel <- cmd
-		res := cmd.Response()
-		packet := messaging.SerializeResponse(res)
-
-		_, err = conn.Write(packet)
+		r.Resch = c.Resch
+		shard := s.getShard(r.Cmd.Key)
+		shard.Reqch <- r
+	}
+}
+func (s *Server)clientWriter(c Client){
+	buf := bufio.NewWriter(c.Conn)
+	header := make([]byte, 5)
+	for{
+		r := <- c.Resch
+		err := messaging.Write(buf, header, r)
 		if err != nil{
-			log.Printf("[client handler] error trying to write message to the client: %v", err)
+			log.Printf("[client writer] %v", err.Error())
 			continue
+		}
+
+		if len(c.Resch) == 0{
+			err = buf.Flush()
+			if err != nil{
+				log.Printf("[client writer] %v", err.Error())
+			}
 		}
 	}
 }
 
-func (s *Server) TTLMonitor() {
-	for {
-		s.mu.Lock()
-
-		if s.TTLheap.Len() == 0 {
-			s.mu.Unlock()
-			time.Sleep(time.Second)
-			continue
-		}
-
-		item := (*s.TTLheap)[0]
-		now := uint64(time.Now().Unix())
-
-		if item.ExpiresAt > now {
-			sleepFor := time.Duration(item.ExpiresAt-now) * time.Second
-			s.mu.Unlock()
-			time.Sleep(sleepFor)
-			continue
-		}
-
-		expiredItem := heap.Pop(s.TTLheap).(*ttlheap.ExpiryItem)
-
-		currentExpiry, ok := s.TTLMap[expiredItem.Key]
-		if !ok || currentExpiry != expiredItem.ExpiresAt {
-			s.mu.Unlock()
-			continue
-		}
-
-		delete(s.TTLMap, expiredItem.Key)
-		delete(s.Store, expiredItem.Key)
-
-		s.mu.Unlock()
-	}
+func (s *Server) getShard(key []byte) *execution.Executor {
+    h := fnv.New32a()
+    h.Write(key)
+    return s.shards[h.Sum32() % uint32(len(s.shards))]
 }
-
-
-
