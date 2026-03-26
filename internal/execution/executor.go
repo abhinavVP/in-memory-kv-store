@@ -2,15 +2,31 @@ package execution
 
 import (
 	"kvs/internal/command"
-	"kvs/internal/ttlheap"
-	"log"
 	"sync"
 )
 
-func Executor(commands chan command.Command, items map[string][]byte, TTLmap map[string]uint64, TTLheap *ttlheap.ExpiryHeap, mu *sync.Mutex){
-	log.Print("[executor] started")
-	for cmd := range commands{
-		cmd.Execute(items, TTLmap, TTLheap, mu)	
+type Request struct{
+	Cmd		command.Command
+	Resch	chan command.Result
+}
+
+type Executor struct{
+	Reqch	chan Request
+	Store	map[string][]byte
+	Mu		sync.Mutex
+}
+
+func (e *Executor) Run(){
+
+	for r := range e.Reqch {
+		switch (r.Cmd.Ctype){
+		case command.SET:
+			r.Resch <- command.ExecSet(e.Store, r.Cmd)
+		case command.GET:
+			r.Resch <- command.ExecGet(e.Store, r.Cmd)
+		case command.DELETE:
+			r.Resch <- command.ExecDelete(e.Store, r.Cmd)
+		}
+			
 	}
-	log.Printf("[executor] channel closed, stopping executor...")
 }
