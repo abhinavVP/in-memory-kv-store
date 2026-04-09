@@ -8,8 +8,8 @@ This may seem expensive at first glance, but goroutines are incredibally cheap a
 Also implements sharded data store model where we partition the map into N<=Cores and let each core handle a subset of the data. This greatly helps improve performance because of better cache locality. Partitioning the data and letting each core handle its own shard greatly helps in reducing unneccesary cache invalidation by eliminating any cross-core communication. Aligning the shard according to cache line sizes will probably eliminate this fully.
 
 
-The executor communicates with all the client handlers using a queue-based mechanism (go's channels) to prevent any race conditions and lock-based access. 
-Each shard gets it's own request queue and requests will be routed accordingly using a hash function. This is basically how a normal single-threaded architecture(Redis) would work but instead of one executor handling all requests and handling the full map, we divide the map and the work.
+The executor communicates with all the client handlers using a queue-based mechanism (go's buffered channels) to prevent any race conditions and lock-based access. 
+Each shard gets it's own request queue and requests will be routed accordingly using a hash function. This is basically how a normal single-threaded architecture(Redis) would work but instead of one executor handling all requests and handling the full map, we divide the map and the work. The response from the executor gets communicated via a private channel reserved for the client. In other words, channel-per-client.
 
 
 Essentially, we have a Redis instance per core model but each core handles only a subset of the map.
