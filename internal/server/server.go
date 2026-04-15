@@ -2,10 +2,12 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"hash/fnv"
 	"kvs/internal/command"
 	"kvs/internal/execution"
 	"kvs/internal/messaging"
+	"kvs/internal/persistance"
 	"log"
 	"net"
 	"sync"
@@ -16,6 +18,7 @@ type Server struct{
 	IP		string
 	shards	[]*execution.Executor
 	N		int
+	AOFpath string
 }
 
 type Client struct{
@@ -23,13 +26,14 @@ type Client struct{
 	Resch 	chan command.Result
 }
 
-func (s *Server)Init(port, ip string, n int){
+func (s *Server)Init(port, ip string, n int, aofpath string){
 	s.PORT = port
 	s.IP = ip
 	s.N = n
+	s.AOFpath = aofpath
 }
 
-func (s *Server)Listen(){
+func (s *Server)Listen(ctx context.Context){
 	lis, err := net.Listen("tcp", net.JoinHostPort(s.IP, s.PORT))
 	if err != nil{
 		log.Printf("[server] error trying to listen: %v", err)
@@ -37,6 +41,9 @@ func (s *Server)Listen(){
 	}
 
 	defer lis.Close()
+
+	aof := persistance.AOF{}
+	go aof.Work(s.AOFpath, ctx)
 
 	s.shards = make([]*execution.Executor, s.N)
 	for i := range s.shards{
@@ -46,9 +53,8 @@ func (s *Server)Listen(){
 			Mu: sync.Mutex{},
 		}
 
-		go s.shards[i].Run()
+		go s.shards[i].Run(ctx, aof.Commands)
 	}
-
 	for {
 		conn , err := lis.Accept()
 		if err != nil{
@@ -61,15 +67,21 @@ func (s *Server)Listen(){
 			Resch: make(chan command.Result, 7),
 		}
 
-		go s.clientReader(c)
-		go s.clientWriter(c)
+		go s.clientReader(c, ctx)
+		go s.clientWriter(c, ctx)
 	}
 }
 
-func (s *Server)clientReader(c Client){
+func (s *Server)clientReader(c Client, ctx context.Context){
 	buf := bufio.NewReader(c.Conn)
 	header := make([]byte, 16)
-	for{	
+
+	go func(){
+		<- ctx.Done()
+		c.Conn.Close()
+	} ()
+
+	for{		
 		r, err := messaging.Read(buf, header)
 		if err != nil{
 			log.Print(err.Error())
@@ -82,21 +94,29 @@ func (s *Server)clientReader(c Client){
 		shard.Reqch <- r
 	}
 }
-func (s *Server)clientWriter(c Client){
+
+func (s *Server)clientWriter(c Client, ctx context.Context){
 	buf := bufio.NewWriter(c.Conn)
 	header := make([]byte, 5)
 	for{
-		r := <- c.Resch
-		err := messaging.Write(buf, header, r)
-		if err != nil{
-			log.Printf("[client writer] %v", err.Error())
-			continue
-		}
-
-		if len(c.Resch) == 0{
-			err = buf.Flush()
+		select{
+		case <- ctx.Done():
+			return
+		case r, ok := <- c.Resch:
+			if !ok {
+				return
+			}
+			err := messaging.Write(buf, header, r)
 			if err != nil{
 				log.Printf("[client writer] %v", err.Error())
+				continue
+			}
+	
+			if len(c.Resch) == 0{
+				err = buf.Flush()
+				if err != nil{
+					log.Printf("[client writer] %v", err.Error())
+				}
 			}
 		}
 	}
