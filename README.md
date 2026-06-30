@@ -2,7 +2,7 @@ An in-memory key-value data store using a custom simple binary protocol.
 
 
 Takes advantage of Go's concurrency capabilities for handling mulitple clients conccurently by using a 2 goroutines per client model. One for reading and one for writing.
-This may seem expensive at first glance, but goroutines are incredibally cheap and although they can dynamically become more and more expensive, most of the work of a handler is de-serialization and serialization and io waiting. And using a binary protocol instead can help make this little cpu bound work even more efficient.
+This may seem expensive at first glance, but goroutines are incredibly cheap and although they can dynamically become more and more expensive, most of the work of a handler is de-serialization and serialization and io waiting. And using a binary protocol instead can help make this little cpu bound work even more efficient.
 
 
 Also implements sharded data store model where we partition the map into N<=Cores and let each core handle a subset of the data. This greatly helps improve performance because of better cache locality. Partitioning the data and letting each core handle its own shard greatly helps in reducing unneccesary cache invalidation by eliminating any cross-core communication. Aligning the shard according to cache line sizes will probably eliminate this fully.
